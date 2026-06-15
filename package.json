@@ -1,0 +1,40 @@
+{
+  "name": "@garygrossgarten/github-action-scp",
+  "version": "0.9.0",
+  "description": "Copy a folder to a remote server using SSH.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/garygrossgarten/github-action-ssh"
+  },
+  "main": "lib/index.js",
+  "scripts": {
+    "build": "tsc",
+    "format": "prettier --write **/*.ts",
+    "format-check": "prettier --check **/*.ts",
+    "pack": "ncc build"
+  },
+  "bin": {
+    "github-action-ssh": "dist/index.js"
+  },
+  "preferGlobal": false,
+  "keywords": [
+    "typescript",
+    "github",
+    "github-actions",
+    "actions",
+    "ssh"
+  ],
+  "author": "garygrossgarten",
+  "license": "MIT",
+  "dependencies": {
+    "@actions/core": "^2.0.0",
+    "node-ssh": "^13.2.1",
+    "ssh2-streams": "^0.4.10"
+  },
+  "devDependencies": {
+    "@types/node": "^24.12.0",
+    "@vercel/ncc": "^0.38.4",
+    "prettier": "^3.8.1",
+    "typescript": "5.9.3"
+  }
+}
