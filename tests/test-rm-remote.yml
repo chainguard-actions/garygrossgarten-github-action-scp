@@ -1,0 +1,126 @@
+name: Test rmRemote option clears remote directory before copy
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up local SSH server and keys
+        run: |
+          # Install openssh-server
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq openssh-server netcat-openbsd
+
+          # Create test user
+          sudo useradd -m -s /bin/bash testuser || true
+          echo "testuser:testpassword" | sudo chpasswd
+
+          # Generate SSH key pair (no passphrase)
+          ssh-keygen -t rsa -b 2048 -f /tmp/test_rsa -N ""
+
+          # Set up authorized_keys for testuser
+          sudo mkdir -p /home/testuser/.ssh
+          sudo cp /tmp/test_rsa.pub /home/testuser/.ssh/authorized_keys
+          sudo chown -R testuser:testuser /home/testuser/.ssh
+          sudo chmod 700 /home/testuser/.ssh
+          sudo chmod 600 /home/testuser/.ssh/authorized_keys
+
+          # Generate host keys if not present
+          sudo ssh-keygen -A
+
+          # Configure and start sshd
+          sudo mkdir -p /run/sshd
+          sudo /usr/sbin/sshd -p 2222 \
+            -o PubkeyAuthentication=yes \
+            -o PasswordAuthentication=no \
+            -o AuthorizedKeysFile=/home/testuser/.ssh/authorized_keys \
+            -o StrictModes=no \
+            -o UsePAM=no \
+            -o ChallengeResponseAuthentication=no \
+            -o KbdInteractiveAuthentication=no
+
+          # Wait for sshd to be ready
+          for i in $(seq 1 30); do
+            nc -z localhost 2222 && echo "SSH ready on port 2222" && break
+            sleep 1
+          done
+
+          # Verify sshd is running
+          nc -z localhost 2222 || (echo "ERROR: sshd not listening on port 2222" && exit 1)
+
+          # Test SSH connection works
+          ssh -i /tmp/test_rsa \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -p 2222 \
+            testuser@localhost \
+            "echo 'SSH OK'" || (echo "SSH test failed" && exit 1)
+
+          # Create remote target directory with a pre-existing stale file
+          sudo mkdir -p /home/testuser/remote-clean
+          echo "old stale content" | sudo tee /home/testuser/remote-clean/stale.txt
+          sudo chown -R testuser:testuser /home/testuser/remote-clean
+
+          # Make key readable
+          chmod 600 /tmp/test_rsa
+
+          # Export key content to env file for use in action
+          echo "PRIVATE_KEY_CONTENT<<EOF" >> $GITHUB_ENV
+          cat /tmp/test_rsa >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+          echo "Setup complete"
+
+      - name: Verify stale file exists before copy
+        run: |
+          if [ ! -f /home/testuser/remote-clean/stale.txt ]; then
+            echo "FAIL: stale.txt should exist before the test"
+            exit 1
+          fi
+          echo "Confirmed stale.txt exists before copy"
+
+      - name: Create local directory to copy
+        run: |
+          mkdir -p /tmp/scp-clean-test
+          echo "new content" > /tmp/scp-clean-test/newfile.txt
+
+      - id: scp
+        name: Run SCP action with rmRemote=true
+        uses: .
+        with:
+          local: /tmp/scp-clean-test
+          remote: /home/testuser/remote-clean
+          host: localhost
+          port: "2222"
+          username: testuser
+          privateKey: ${{ env.PRIVATE_KEY_CONTENT }}
+          rmRemote: "true"
+          recursive: "true"
+          verbose: "true"
+
+      - name: Assert stale file was removed and new file exists
+        run: |
+          echo "Files in remote-clean after copy:"
+          ls -la /home/testuser/remote-clean/
+
+          if [ -f /home/testuser/remote-clean/stale.txt ]; then
+            echo "FAIL: stale.txt should have been removed by rmRemote"
+            exit 1
+          fi
+          echo "PASS: stale.txt was removed"
+
+          if [ ! -f /home/testuser/remote-clean/newfile.txt ]; then
+            echo "FAIL: newfile.txt should have been copied"
+            exit 1
+          fi
+
+          CONTENT=$(cat /home/testuser/remote-clean/newfile.txt)
+          echo "newfile.txt content: $CONTENT"
+          if [ "$CONTENT" != "new content" ]; then
+            echo "FAIL: newfile.txt content mismatch"
+            exit 1
+          fi
+
+          echo "PASS: rmRemote cleared old files and new file was copied successfully"

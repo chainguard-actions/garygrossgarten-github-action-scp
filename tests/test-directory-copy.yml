@@ -1,0 +1,143 @@
+name: Test directory copy via SCP
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up local SSH server and keys
+        run: |
+          # Install openssh-server
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq openssh-server netcat-openbsd
+
+          # Create test user
+          sudo useradd -m -s /bin/bash testuser || true
+          echo "testuser:testpassword" | sudo chpasswd
+
+          # Generate SSH key pair (no passphrase)
+          ssh-keygen -t rsa -b 2048 -f /tmp/test_rsa -N ""
+
+          # Set up authorized_keys for testuser
+          sudo mkdir -p /home/testuser/.ssh
+          sudo cp /tmp/test_rsa.pub /home/testuser/.ssh/authorized_keys
+          sudo chown -R testuser:testuser /home/testuser/.ssh
+          sudo chmod 700 /home/testuser/.ssh
+          sudo chmod 600 /home/testuser/.ssh/authorized_keys
+
+          # Generate host keys if not present
+          sudo ssh-keygen -A
+
+          # Configure and start sshd
+          sudo mkdir -p /run/sshd
+          sudo /usr/sbin/sshd -p 2222 \
+            -o PubkeyAuthentication=yes \
+            -o PasswordAuthentication=no \
+            -o AuthorizedKeysFile=/home/testuser/.ssh/authorized_keys \
+            -o StrictModes=no \
+            -o UsePAM=no \
+            -o ChallengeResponseAuthentication=no \
+            -o KbdInteractiveAuthentication=no
+
+          # Wait for sshd to be ready
+          for i in $(seq 1 30); do
+            nc -z localhost 2222 && echo "SSH ready on port 2222" && break
+            sleep 1
+          done
+
+          # Verify sshd is running
+          nc -z localhost 2222 || (echo "ERROR: sshd not listening on port 2222" && exit 1)
+
+          # Test SSH connection works
+          ssh -i /tmp/test_rsa \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -p 2222 \
+            testuser@localhost \
+            "echo 'SSH OK'" || (echo "SSH test failed" && exit 1)
+
+          # Create remote target directory
+          sudo mkdir -p /home/testuser/remote-dir
+          sudo chown testuser:testuser /home/testuser/remote-dir
+
+          # Make key readable
+          chmod 600 /tmp/test_rsa
+
+          # Export key content to env file for use in action
+          echo "PRIVATE_KEY_CONTENT<<EOF" >> $GITHUB_ENV
+          cat /tmp/test_rsa >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+          echo "Setup complete"
+
+      - name: Create local directory structure to copy
+        run: |
+          mkdir -p /tmp/scp-dir-test/subdir
+          echo "file one content" > /tmp/scp-dir-test/file1.txt
+          echo "file two content" > /tmp/scp-dir-test/file2.txt
+          echo "nested file content" > /tmp/scp-dir-test/subdir/nested.txt
+
+      - id: scp
+        name: Run SCP action - copy directory recursively
+        uses: .
+        with:
+          local: /tmp/scp-dir-test
+          remote: /home/testuser/remote-dir
+          host: localhost
+          port: "2222"
+          username: testuser
+          privateKey: ${{ env.PRIVATE_KEY_CONTENT }}
+          recursive: "true"
+          verbose: "true"
+          concurrency: "2"
+
+      - name: Assert directory was copied
+        run: |
+          echo "Files in remote-dir:"
+          find /home/testuser/remote-dir -type f
+
+          FAIL=0
+
+          if [ ! -f /home/testuser/remote-dir/file1.txt ]; then
+            echo "FAIL: expected file1.txt to exist"
+            FAIL=1
+          fi
+
+          if [ ! -f /home/testuser/remote-dir/file2.txt ]; then
+            echo "FAIL: expected file2.txt to exist"
+            FAIL=1
+          fi
+
+          if [ ! -f /home/testuser/remote-dir/subdir/nested.txt ]; then
+            echo "FAIL: expected subdir/nested.txt to exist"
+            FAIL=1
+          fi
+
+          if [ "$FAIL" = "1" ]; then
+            exit 1
+          fi
+
+          CONTENT1=$(cat /home/testuser/remote-dir/file1.txt)
+          CONTENT2=$(cat /home/testuser/remote-dir/file2.txt)
+          CONTENT3=$(cat /home/testuser/remote-dir/subdir/nested.txt)
+
+          echo "file1.txt: $CONTENT1"
+          echo "file2.txt: $CONTENT2"
+          echo "subdir/nested.txt: $CONTENT3"
+
+          if [ "$CONTENT1" != "file one content" ]; then
+            echo "FAIL: file1.txt content mismatch"
+            exit 1
+          fi
+          if [ "$CONTENT2" != "file two content" ]; then
+            echo "FAIL: file2.txt content mismatch"
+            exit 1
+          fi
+          if [ "$CONTENT3" != "nested file content" ]; then
+            echo "FAIL: nested.txt content mismatch"
+            exit 1
+          fi
+
+          echo "PASS: directory copied successfully with all files intact"

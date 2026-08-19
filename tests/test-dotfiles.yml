@@ -1,0 +1,119 @@
+name: Test dotfiles option includes hidden files
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up local SSH server and keys
+        run: |
+          # Install openssh-server
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq openssh-server netcat-openbsd
+
+          # Create test user
+          sudo useradd -m -s /bin/bash testuser || true
+          echo "testuser:testpassword" | sudo chpasswd
+
+          # Generate SSH key pair (no passphrase)
+          ssh-keygen -t rsa -b 2048 -f /tmp/test_rsa -N ""
+
+          # Set up authorized_keys for testuser
+          sudo mkdir -p /home/testuser/.ssh
+          sudo cp /tmp/test_rsa.pub /home/testuser/.ssh/authorized_keys
+          sudo chown -R testuser:testuser /home/testuser/.ssh
+          sudo chmod 700 /home/testuser/.ssh
+          sudo chmod 600 /home/testuser/.ssh/authorized_keys
+
+          # Generate host keys if not present
+          sudo ssh-keygen -A
+
+          # Configure and start sshd
+          sudo mkdir -p /run/sshd
+          sudo /usr/sbin/sshd -p 2222 \
+            -o PubkeyAuthentication=yes \
+            -o PasswordAuthentication=no \
+            -o AuthorizedKeysFile=/home/testuser/.ssh/authorized_keys \
+            -o StrictModes=no \
+            -o UsePAM=no \
+            -o ChallengeResponseAuthentication=no \
+            -o KbdInteractiveAuthentication=no
+
+          # Wait for sshd to be ready
+          for i in $(seq 1 30); do
+            nc -z localhost 2222 && echo "SSH ready on port 2222" && break
+            sleep 1
+          done
+
+          # Verify sshd is running
+          nc -z localhost 2222 || (echo "ERROR: sshd not listening on port 2222" && exit 1)
+
+          # Test SSH connection works
+          ssh -i /tmp/test_rsa \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -p 2222 \
+            testuser@localhost \
+            "echo 'SSH OK'" || (echo "SSH test failed" && exit 1)
+
+          # Create remote target directory
+          sudo mkdir -p /home/testuser/remote-dots
+          sudo chown testuser:testuser /home/testuser/remote-dots
+
+          # Make key readable
+          chmod 600 /tmp/test_rsa
+
+          # Export key content to env file for use in action
+          echo "PRIVATE_KEY_CONTENT<<EOF" >> $GITHUB_ENV
+          cat /tmp/test_rsa >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+          echo "Setup complete"
+
+      - name: Create local directory with dotfiles
+        run: |
+          mkdir -p /tmp/scp-dots-test
+          echo "regular file" > /tmp/scp-dots-test/regular.txt
+          echo "hidden file content" > /tmp/scp-dots-test/.hidden
+          echo "another hidden" > /tmp/scp-dots-test/.env
+
+      - id: scp
+        name: Run SCP action with dotfiles=true
+        uses: .
+        with:
+          local: /tmp/scp-dots-test
+          remote: /home/testuser/remote-dots
+          host: localhost
+          port: "2222"
+          username: testuser
+          privateKey: ${{ env.PRIVATE_KEY_CONTENT }}
+          dotfiles: "true"
+          recursive: "true"
+          verbose: "true"
+
+      - name: Assert regular and dotfiles were copied
+        run: |
+          echo "Files in remote-dots (including hidden):"
+          ls -la /home/testuser/remote-dots/
+
+          if [ ! -f /home/testuser/remote-dots/regular.txt ]; then
+            echo "FAIL: regular.txt should have been copied"
+            exit 1
+          fi
+          echo "PASS: regular.txt copied"
+
+          if [ ! -f /home/testuser/remote-dots/.hidden ]; then
+            echo "FAIL: .hidden dotfile should have been copied with dotfiles=true"
+            exit 1
+          fi
+          echo "PASS: .hidden dotfile copied"
+
+          if [ ! -f /home/testuser/remote-dots/.env ]; then
+            echo "FAIL: .env dotfile should have been copied with dotfiles=true"
+            exit 1
+          fi
+          echo "PASS: .env dotfile copied"
+
+          echo "PASS: all files including dotfiles were copied successfully"

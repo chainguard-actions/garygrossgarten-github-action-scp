@@ -1,0 +1,99 @@
+name: Test SCP with SSH key authentication
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up SSH server with key auth
+        run: |
+          # Install openssh-server
+          apt-get update -qq && apt-get install -y -qq openssh-server
+
+          # Create test user
+          useradd -m -s /bin/bash sshuser || true
+          mkdir -p /home/sshuser/.ssh
+          chmod 700 /home/sshuser/.ssh
+
+          # Generate SSH key pair for the test
+          ssh-keygen -t rsa -b 2048 -f /tmp/test_rsa -N "" -q
+
+          # Authorize the public key
+          cp /tmp/test_rsa.pub /home/sshuser/.ssh/authorized_keys
+          chmod 600 /home/sshuser/.ssh/authorized_keys
+          chown -R sshuser:sshuser /home/sshuser/.ssh
+
+          # Configure sshd
+          mkdir -p /var/run/sshd
+          cat > /etc/ssh/sshd_config <<'EOF'
+          Port 2222
+          ListenAddress 0.0.0.0
+          HostKey /etc/ssh/ssh_host_rsa_key
+          HostKey /etc/ssh/ssh_host_ecdsa_key
+          HostKey /etc/ssh/ssh_host_ed25519_key
+          PermitRootLogin no
+          PubkeyAuthentication yes
+          AuthorizedKeysFile .ssh/authorized_keys
+          PasswordAuthentication no
+          ChallengeResponseAuthentication no
+          UsePAM yes
+          PrintMotd no
+          AcceptEnv LANG LC_*
+          Subsystem sftp /usr/lib/openssh/sftp-server
+          StrictModes no
+          EOF
+
+          # Generate host keys if missing
+          ssh-keygen -A
+
+          # Start sshd on port 2222
+          /usr/sbin/sshd -p 2222 -o "StrictModes no"
+
+          # Verify sshd is running
+          sleep 2
+          ss -tlnp | grep :2222 || true
+          echo "sshd started"
+
+          # Store private key content to env file for next step
+          echo "SSH_PRIVATE_KEY<<KEYEOF" >> $GITHUB_ENV
+          cat /tmp/test_rsa >> $GITHUB_ENV
+          echo "KEYEOF" >> $GITHUB_ENV
+
+      - name: Create local test file
+        run: |
+          mkdir -p /tmp/key-test-dir
+          echo "key auth test content" > /tmp/key-test-dir/keytest.txt
+
+      - name: Create remote destination directory
+        run: |
+          mkdir -p /home/sshuser/key-dest
+          chown sshuser:sshuser /home/sshuser/key-dest
+
+      - id: scp-action
+        uses: .
+        with:
+          local: /tmp/key-test-dir/
+          remote: /home/sshuser/key-dest/
+          host: localhost
+          port: "2222"
+          username: sshuser
+          privateKey: ${{ env.SSH_PRIVATE_KEY }}
+          verbose: true
+
+      - name: Assert file was copied via key auth
+        run: |
+          echo "Checking remote destination..."
+          ls -la /home/sshuser/key-dest/
+          if [ ! -f "/home/sshuser/key-dest/keytest.txt" ]; then
+            echo "FAIL: keytest.txt not found in remote destination"
+            exit 1
+          fi
+          CONTENT=$(cat /home/sshuser/key-dest/keytest.txt)
+          echo "Content: $CONTENT"
+          if [ "$CONTENT" != "key auth test content" ]; then
+            echo "FAIL: file content does not match expected value"
+            exit 1
+          fi
+          echo "PASS: file copied successfully via SSH key authentication"

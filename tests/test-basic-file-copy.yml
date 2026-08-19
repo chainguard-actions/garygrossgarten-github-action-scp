@@ -1,0 +1,105 @@
+name: Test basic file copy via SCP
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up local SSH server and keys
+        run: |
+          # Install openssh-server
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq openssh-server netcat-openbsd
+
+          # Create test user
+          sudo useradd -m -s /bin/bash testuser || true
+          echo "testuser:testpassword" | sudo chpasswd
+
+          # Generate SSH key pair (no passphrase) owned by current user
+          ssh-keygen -t rsa -b 2048 -f /tmp/test_rsa -N ""
+
+          # Set up authorized_keys for testuser
+          sudo mkdir -p /home/testuser/.ssh
+          sudo cp /tmp/test_rsa.pub /home/testuser/.ssh/authorized_keys
+          sudo chown -R testuser:testuser /home/testuser/.ssh
+          sudo chmod 700 /home/testuser/.ssh
+          sudo chmod 600 /home/testuser/.ssh/authorized_keys
+
+          # Generate host keys if not present
+          sudo ssh-keygen -A
+
+          # Configure sshd
+          sudo mkdir -p /run/sshd
+          sudo /usr/sbin/sshd -p 2222 \
+            -o PubkeyAuthentication=yes \
+            -o PasswordAuthentication=no \
+            -o AuthorizedKeysFile=/home/testuser/.ssh/authorized_keys \
+            -o StrictModes=no \
+            -o UsePAM=no \
+            -o ChallengeResponseAuthentication=no \
+            -o KbdInteractiveAuthentication=no
+
+          # Wait for sshd to be ready
+          for i in $(seq 1 30); do
+            nc -z localhost 2222 && echo "SSH ready on port 2222" && break
+            sleep 1
+          done
+
+          # Verify sshd is running
+          nc -z localhost 2222 || (echo "ERROR: sshd not listening on port 2222" && exit 1)
+
+          # Test SSH connection works
+          ssh -i /tmp/test_rsa \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -p 2222 \
+            testuser@localhost \
+            "echo 'SSH OK'" || (echo "SSH test failed" && exit 1)
+
+          # Create remote target directory
+          sudo mkdir -p /home/testuser/remote
+          sudo chown testuser:testuser /home/testuser/remote
+
+          # Make key readable
+          chmod 600 /tmp/test_rsa
+
+          # Export key content to env file for use in action
+          echo "PRIVATE_KEY_CONTENT<<EOF" >> $GITHUB_ENV
+          cat /tmp/test_rsa >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+          echo "Setup complete"
+
+      - name: Create local file to copy
+        run: |
+          mkdir -p /tmp/scp-test
+          echo "Hello from SCP test" > /tmp/scp-test/hello.txt
+
+      - id: scp
+        name: Run SCP action - copy single file
+        uses: .
+        with:
+          local: /tmp/scp-test/hello.txt
+          remote: /home/testuser/remote/hello.txt
+          host: localhost
+          port: "2222"
+          username: testuser
+          privateKey: ${{ env.PRIVATE_KEY_CONTENT }}
+          verbose: "true"
+
+      - name: Assert file was copied
+        run: |
+          if [ ! -f /home/testuser/remote/hello.txt ]; then
+            echo "FAIL: expected /home/testuser/remote/hello.txt to exist"
+            ls -la /home/testuser/remote/ || true
+            exit 1
+          fi
+          CONTENT=$(cat /home/testuser/remote/hello.txt)
+          echo "actual content: $CONTENT"
+          if [ "$CONTENT" != "Hello from SCP test" ]; then
+            echo "FAIL: file content mismatch, got: $CONTENT"
+            exit 1
+          fi
+          echo "PASS: file copied successfully"
