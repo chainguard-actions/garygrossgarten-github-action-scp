@@ -9,6 +9,7 @@ Hardened by [Chainguard](https://www.chainguard.dev) from the upstream action at
 | Version | Tag | Upstream commit |
 |---------|-----|-----------------|
 | 0.10.0 | [`0.10.0`](https://github.com/chainguard-actions/garygrossgarten-github-action-scp/tree/0.10.0) | [`ed47763`](https://github.com/garygrossgarten/github-action-scp/commit/ed477632dd301838ec1bf5307febbd7ff8d2962f) |
+| v0.8.0 | [`v0.8.0`](https://github.com/chainguard-actions/garygrossgarten-github-action-scp/tree/v0.8.0) | [`8a27854`](https://github.com/garygrossgarten/github-action-scp/commit/8a27854bb4f124a497a67316e83783efda770119) |
 
 ## Privacy
 
