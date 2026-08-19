@@ -1,0 +1,86 @@
+name: Test SCP copy with dotfiles enabled
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up local SSH server
+        run: |
+          # Install and configure openssh-server
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq openssh-server
+
+          # Create test user
+          sudo useradd -m -s /bin/bash sshtest2 || true
+          echo "sshtest2:testpassword456" | sudo chpasswd
+
+          # Configure sshd
+          sudo mkdir -p /var/run/sshd
+          sudo ssh-keygen -A
+
+          # Start sshd on port 2223
+          sudo /usr/sbin/sshd -p 2223 -o "PasswordAuthentication=yes" -o "PermitRootLogin=no"
+
+          # Wait for sshd to be ready
+          for i in $(seq 1 10); do
+            if nc -z localhost 2223 2>/dev/null; then
+              echo "SSH server is ready"
+              break
+            fi
+            sleep 1
+          done
+
+          # Create remote destination directory
+          sudo mkdir -p /tmp/scp-dotfiles-remote
+          sudo chown sshtest2:sshtest2 /tmp/scp-dotfiles-remote
+
+      - name: Create local files including dotfiles
+        run: |
+          mkdir -p /tmp/scp-dotfiles-local
+          echo "regular file" > /tmp/scp-dotfiles-local/regular.txt
+          echo "dotfile content" > /tmp/scp-dotfiles-local/.hidden
+          echo "another dotfile" > /tmp/scp-dotfiles-local/.env
+
+      - name: Add localhost to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -p 2223 localhost >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - id: action
+        uses: .
+        with:
+          local: /tmp/scp-dotfiles-local
+          remote: /tmp/scp-dotfiles-remote
+          host: localhost
+          username: sshtest2
+          password: testpassword456
+          port: "2223"
+          dotfiles: "true"
+          verbose: "true"
+          recursive: "true"
+
+      - name: Assert regular and dotfiles were copied
+        run: |
+          echo "Checking copied files..."
+          if [ ! -f /tmp/scp-dotfiles-remote/regular.txt ]; then
+            echo "FAIL: regular.txt was not copied"
+            exit 1
+          fi
+          echo "regular.txt: $(cat /tmp/scp-dotfiles-remote/regular.txt)"
+
+          if [ ! -f /tmp/scp-dotfiles-remote/.hidden ]; then
+            echo "FAIL: .hidden dotfile was not copied (dotfiles=true should include it)"
+            exit 1
+          fi
+          echo ".hidden: $(cat /tmp/scp-dotfiles-remote/.hidden)"
+
+          if [ ! -f /tmp/scp-dotfiles-remote/.env ]; then
+            echo "FAIL: .env dotfile was not copied (dotfiles=true should include it)"
+            exit 1
+          fi
+          echo ".env: $(cat /tmp/scp-dotfiles-remote/.env)"
+
+          echo "PASS: all files including dotfiles copied successfully"

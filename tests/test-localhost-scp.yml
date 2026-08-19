@@ -1,0 +1,88 @@
+name: Test SCP copy to localhost SSH server
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up local SSH server
+        run: |
+          # Install and configure openssh-server
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq openssh-server
+
+          # Create test user
+          sudo useradd -m -s /bin/bash sshtest || true
+          echo "sshtest:testpassword123" | sudo chpasswd
+
+          # Configure sshd to allow password auth and run on port 2222
+          sudo mkdir -p /var/run/sshd
+          sudo ssh-keygen -A
+
+          # Write a minimal sshd config
+          sudo tee /etc/ssh/sshd_config.d/test.conf > /dev/null <<'EOF'
+          Port 2222
+          PasswordAuthentication yes
+          PermitRootLogin no
+          PubkeyAuthentication yes
+          EOF
+
+          # Start sshd on port 2222
+          sudo /usr/sbin/sshd -p 2222 -o "PasswordAuthentication=yes" -o "PermitRootLogin=no"
+
+          # Wait for sshd to be ready
+          for i in $(seq 1 10); do
+            if nc -z localhost 2222 2>/dev/null; then
+              echo "SSH server is ready"
+              break
+            fi
+            sleep 1
+          done
+
+          # Create remote destination directory
+          sudo mkdir -p /tmp/scp-remote
+          sudo chown sshtest:sshtest /tmp/scp-remote
+
+      - name: Create local files to copy
+        run: |
+          mkdir -p /tmp/scp-local
+          echo "hello from scp test" > /tmp/scp-local/hello.txt
+          echo "another file" > /tmp/scp-local/world.txt
+
+      - name: Add localhost to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -p 2222 localhost >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - id: action
+        uses: .
+        with:
+          local: /tmp/scp-local
+          remote: /tmp/scp-remote
+          host: localhost
+          username: sshtest
+          password: testpassword123
+          port: "2222"
+          verbose: "true"
+          recursive: "true"
+
+      - name: Assert files were copied
+        run: |
+          echo "Checking copied files..."
+          if [ ! -f /tmp/scp-remote/hello.txt ]; then
+            echo "FAIL: hello.txt was not copied to remote"
+            exit 1
+          fi
+          CONTENT=$(cat /tmp/scp-remote/hello.txt)
+          echo "hello.txt content: $CONTENT"
+          if [ "$CONTENT" != "hello from scp test" ]; then
+            echo "FAIL: hello.txt content mismatch"
+            exit 1
+          fi
+          if [ ! -f /tmp/scp-remote/world.txt ]; then
+            echo "FAIL: world.txt was not copied to remote"
+            exit 1
+          fi
+          echo "PASS: all files copied successfully"

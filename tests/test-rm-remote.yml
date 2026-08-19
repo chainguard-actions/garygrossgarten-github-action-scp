@@ -1,0 +1,88 @@
+name: Test SCP copy with rmRemote (clean remote before copy)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up local SSH server
+        run: |
+          # Install and configure openssh-server
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq openssh-server
+
+          # Create test user
+          sudo useradd -m -s /bin/bash sshtest3 || true
+          echo "sshtest3:testpassword789" | sudo chpasswd
+
+          # Configure sshd
+          sudo mkdir -p /var/run/sshd
+          sudo ssh-keygen -A
+
+          # Start sshd on port 2224
+          sudo /usr/sbin/sshd -p 2224 -o "PasswordAuthentication=yes" -o "PermitRootLogin=no"
+
+          # Wait for sshd to be ready
+          for i in $(seq 1 10); do
+            if nc -z localhost 2224 2>/dev/null; then
+              echo "SSH server is ready"
+              break
+            fi
+            sleep 1
+          done
+
+          # Create remote destination directory with pre-existing files
+          sudo mkdir -p /tmp/scp-rm-remote
+          sudo chown sshtest3:sshtest3 /tmp/scp-rm-remote
+          # Create a pre-existing file that should be removed
+          sudo -u sshtest3 bash -c 'echo "old file content" > /tmp/scp-rm-remote/old-file.txt'
+          echo "Pre-existing file created:"
+          ls -la /tmp/scp-rm-remote/
+
+      - name: Create local files to copy
+        run: |
+          mkdir -p /tmp/scp-rm-local
+          echo "new file content" > /tmp/scp-rm-local/new-file.txt
+
+      - name: Add localhost to known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -p 2224 localhost >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - id: action
+        uses: .
+        with:
+          local: /tmp/scp-rm-local
+          remote: /tmp/scp-rm-remote
+          host: localhost
+          username: sshtest3
+          password: testpassword789
+          port: "2224"
+          rmRemote: "true"
+          verbose: "true"
+          recursive: "true"
+
+      - name: Assert old file removed and new file present
+        run: |
+          echo "Checking remote directory contents..."
+          ls -la /tmp/scp-rm-remote/ || true
+
+          if [ -f /tmp/scp-rm-remote/old-file.txt ]; then
+            echo "FAIL: old-file.txt should have been removed by rmRemote=true"
+            exit 1
+          fi
+          echo "PASS: old-file.txt was removed"
+
+          if [ ! -f /tmp/scp-rm-remote/new-file.txt ]; then
+            echo "FAIL: new-file.txt was not copied"
+            exit 1
+          fi
+          CONTENT=$(cat /tmp/scp-rm-remote/new-file.txt)
+          echo "new-file.txt content: $CONTENT"
+          if [ "$CONTENT" != "new file content" ]; then
+            echo "FAIL: new-file.txt content mismatch"
+            exit 1
+          fi
+          echo "PASS: rmRemote cleaned old files and new files were copied successfully"

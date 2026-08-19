@@ -1,0 +1,39 @@
+name: Test SCP connection failure (graceful error)
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Create local file to copy
+        run: |
+          mkdir -p /tmp/scp-test-local
+          echo "hello world" > /tmp/scp-test-local/test.txt
+
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          local: /tmp/scp-test-local
+          remote: /tmp/scp-test-remote
+          host: 192.0.2.1
+          username: testuser
+          password: testpassword
+          port: "22"
+
+      - name: Assert action failed gracefully on unreachable host
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+        run: |
+          echo "outcome: $OUTCOME"
+          if [ "$OUTCOME" = "failure" ]; then
+            echo "PASS: action failed gracefully as expected (unreachable host)"
+          elif [ "$OUTCOME" = "success" ]; then
+            echo "FAIL: action unexpectedly succeeded connecting to 192.0.2.1"
+            exit 1
+          else
+            echo "FAIL: unexpected outcome '$OUTCOME'"
+            exit 1
+          fi
